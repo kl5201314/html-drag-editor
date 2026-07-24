@@ -1,0 +1,28 @@
+{
+  "name": "html-drag-editor",
+  "version": "0.1.0",
+  "description": "AI驱动 + 可视化拖拽的 HTML 原型工具 / AI-powered visual HTML drag editor for rapid prototyping with Claude Code",
+  "keywords": [
+    "claude-code-skill",
+    "html-editor",
+    "drag-and-drop",
+    "prototyping",
+    "visual-editor",
+    "claude"
+  ],
+  "author": "bkykkkl",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kl5201314/html-drag-editor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kl5201314/html-drag-editor/issues"
+  },
+  "homepage": "https://github.com/kl5201314/html-drag-editor#readme",
+  "files": [
+    "SKILL.md",
+    "assets/",
+    "scripts/"
+  ]
+}
