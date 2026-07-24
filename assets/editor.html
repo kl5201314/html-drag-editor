@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HTML 拖拽编辑器</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #1e1e1e;
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: #252526;
+    border-bottom: 1px solid #333;
+    flex-shrink: 0;
+  }
+  .toolbar button, .toolbar label {
+    background: #0e639c;
+    color: #fff;
+    border: none;
+    padding: 7px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    user-select: none;
+  }
+  .toolbar button:hover, .toolbar label:hover { background: #1177bb; }
+  .toolbar button:disabled { background: #555; cursor: not-allowed; }
+  .toolbar input[type="file"] { display: none; }
+  .toolbar .status {
+    margin-left: auto;
+    font-size: 12px;
+    color: #aaa;
+  }
+  .toolbar .mode-use { background: #2ea043; }
+  .toolbar .mode-use:hover { background: #3fb950; }
+  .toolbar .mode-edit { background: #d29922; }
+  .toolbar .mode-edit:hover { background: #e3b341; }
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  iframe {
+    flex: 1;
+    border: none;
+    background: #fff;
+  }
+  .props {
+    width: 240px;
+    flex-shrink: 0;
+    background: #252526;
+    border-left: 1px solid #333;
+    padding: 16px;
+    font-size: 13px;
+    overflow-y: auto;
+  }
+  .props h3 { margin: 0 0 12px; font-size: 14px; font-weight: 500; color: #fff; }
+  .props .row { margin-bottom: 10px; color: #ccc; }
+  .props .row span { color: #888; }
+  .props .empty { color: #777; }
+  .props .hint { margin-top: 16px; padding-top: 12px; border-top: 1px solid #333; color: #888; font-size: 12px; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <label for="fileInput">导入 HTML</label>
+    <input type="file" id="fileInput" accept=".html,.htm">
+    <button id="btnMode" disabled>进入修改模式</button>
+    <button id="btnExport" disabled>导出 HTML</button>
+    <button id="btnSaveOrigin" disabled>保存到原文件</button>
+    <button id="btnRefresh" disabled>刷新页面</button>
+    <div class="status" id="status">请导入 HTML 文件</div>
+  </div>
+  <div class="main">
+    <iframe id="preview"></iframe>
+    <div class="props">
+      <h3>属性</h3>
+      <div id="propContent"><div class="empty">未选中元素</div></div>
+      <div class="hint" id="modeHint">导入后点击“进入修改模式”开始拖拽。修改模式下 Ctrl+Z 撤销，Ctrl+Shift+Z 重做。</div>
+    </div>
+  </div>
+
+<script>
+  const fileInput = document.getElementById('fileInput');
+  const btnMode = document.getElementById('btnMode');
+  const btnExport = document.getElementById('btnExport');
+  const btnSaveOrigin = document.getElementById('btnSaveOrigin');
+  const btnRefresh = document.getElementById('btnRefresh');
+  const status = document.getElementById('status');
+  const modeHint = document.getElementById('modeHint');
+  const preview = document.getElementById('preview');
+  const propContent = document.getElementById('propContent');
+
+  let originalHtml = '';
+  let templatedHtml = '';
+  let transforms = {};
+  let currentFileHandle = null;
+  let currentFileName = '';
+  let selectedId = null;
+  let mode = 'use'; // 'use' | 'edit'
+  let serverMode = false; // true when loaded via ?file= from the local server
+  let sourceUrl = ''; // original fetch URL, used by refresh
+
+  const iframeEditorScript = `(function() {
+    'use strict';
+    let mode = 'use';
+    let selectedId = null;
+    let transforms = {};
+    let history = [{}];
+    let historyIndex = 0;
+    let dragging = false;
+    let dragHasMoved = false;
+    let dragStart = { x: 0, y: 0, elX: 0, elY: 0 };
+    let overlay = null;
+    let shield = null;
+
+    function log(msg) { console.log('[ed]', msg); }
+
+    function createShield() {
+      const s = document.createElement('div');
+      s.id = 'ed-shield';
+      s.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483645;cursor:move;display:none;';
+      document.body.appendChild(s);
+      return s;
+    }
+
+    function createOverlay() {
+      const ov = document.createElement('div');
+      ov.id = 'ed-overlay';
+      ov.style.cssText = 'position:fixed;pointer-events:none;box-sizing:border-box;border:2px solid #0e639c;z-index:2147483646;display:none;';
+      document.body.appendChild(ov);
+      return ov;
+    }
+
+    function updateOverlay(el) {
+      if (!el || !overlay) return;
+      const rect = el.getBoundingClientRect();
+      overlay.style.display = 'block';
+      overlay.style.left = rect.left + 'px';
+      overlay.style.top = rect.top + 'px';
+      overlay.style.width = rect.width + 'px';
+      overlay.style.height = rect.height + 'px';
+    }
+
+    function findEditable(target) {
+      while (target && target !== document.body && target !== document.documentElement) {
+        if (target.hasAttribute && target.hasAttribute('data-edit-id')) return target;
+        target = target.parentElement;
+      }
+      return null;
+    }
+
+    function isInput(el) {
+      if (!el) return false;
+      const tag = el.tagName.toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
+    }
+
+    function select(el) {
+      document.querySelectorAll('.ed-selected').forEach(function(e) { e.classList.remove('ed-selected'); });
+      selectedId = el ? el.getAttribute('data-edit-id') : null;
+      if (el) {
+        el.classList.add('ed-selected');
+        updateOverlay(el);
+      } else if (overlay) {
+        overlay.style.display = 'none';
+      }
+      parent.postMessage({ type: 'select', id: selectedId }, '*');
+    }
+
+    function applyTransform(el, t) {
+      el.style.transform = 'translate(' + t.x + 'px, ' + t.y + 'px)';
+      updateOverlay(el);
+    }
+
+    function applyAllTransforms() {
+      document.querySelectorAll('[data-edit-id]').forEach(function(el) {
+        const id = el.getAttribute('data-edit-id');
+        const t = transforms[id];
+        if (t) el.style.transform = 'translate(' + t.x + 'px, ' + t.y + 'px)';
+        else el.style.transform = '';
+      });
+      if (selectedId) {
+        const el = document.querySelector('[data-edit-id="' + selectedId + '"]');
+        updateOverlay(el);
+      }
+    }
+
+    function recordBefore() {
+      if (historyIndex < history.length - 1) {
+        history = history.slice(0, historyIndex + 1);
+      }
+      history.push(JSON.parse(JSON.stringify(transforms)));
+      historyIndex++;
+    }
+
+    function recordAfter() {
+      history.push(JSON.parse(JSON.stringify(transforms)));
+      historyIndex++;
+    }
+
+    function undo() {
+      if (historyIndex > 0) {
+        historyIndex--;
+        transforms = JSON.parse(JSON.stringify(history[historyIndex]));
+        applyAllTransforms();
+        parent.postMessage({ type: 'transformsSnapshot', transforms: transforms }, '*');
+      }
+    }
+
+    function redo() {
+      if (historyIndex < history.length - 1) {
+        historyIndex++;
+        transforms = JSON.parse(JSON.stringify(history[historyIndex]));
+        applyAllTransforms();
+        parent.postMessage({ type: 'transformsSnapshot', transforms: transforms }, '*');
+      }
+    }
+
+    function prepareUseModeLinks() {
+      document.querySelectorAll('a').forEach(function(a) {
+        if (!a.hasAttribute('target')) a.setAttribute('target', '_top');
+      });
+      document.querySelectorAll('form').forEach(function(f) {
+        if (!f.hasAttribute('target')) f.setAttribute('target', '_top');
+      });
+    }
+
+    function setMode(newMode) {
+      mode = newMode;
+      if (mode === 'use') {
+        select(null);
+        document.body.classList.remove('ed-dragging');
+        if (shield) shield.style.display = 'none';
+        document.documentElement.classList.remove('ed-mode-edit');
+        document.documentElement.classList.add('ed-mode-use');
+        prepareUseModeLinks();
+      } else {
+        if (shield) shield.style.display = 'block';
+        document.documentElement.classList.remove('ed-mode-use');
+        document.documentElement.classList.add('ed-mode-edit');
+      }
+      log('mode set to ' + mode);
+    }
+
+    function getElementUnderShield(x, y) {
+      if (!shield) return null;
+      shield.style.display = 'none';
+      const el = document.elementFromPoint(x, y);
+      shield.style.display = 'block';
+      return findEditable(el);
+    }
+
+    function onShieldMouseDown(e) {
+      if (mode !== 'edit') return;
+      const el = getElementUnderShield(e.clientX, e.clientY);
+      if (!el) { select(null); return; }
+      select(el);
+      dragging = true;
+      dragHasMoved = false;
+      document.body.classList.add('ed-dragging');
+      dragStart.x = e.clientX;
+      dragStart.y = e.clientY;
+      const id = el.getAttribute('data-edit-id');
+      const t = transforms[id] || { x: 0, y: 0 };
+      dragStart.elX = t.x;
+      dragStart.elY = t.y;
+
+      function onMove(ev) {
+        if (!dragging) return;
+        if (!dragHasMoved) {
+          recordBefore();
+          dragHasMoved = true;
+        }
+        const dx = ev.clientX - dragStart.x;
+        const dy = ev.clientY - dragStart.y;
+        transforms[id] = { x: dragStart.elX + dx, y: dragStart.elY + dy };
+        applyTransform(el, transforms[id]);
+        parent.postMessage({ type: 'transform', id: id, x: transforms[id].x, y: transforms[id].y }, '*');
+      }
+
+      function onUp() {
+        if (dragging && dragHasMoved) recordAfter();
+        dragging = false;
+        document.body.classList.remove('ed-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    }
+
+    function onKeyDown(e) {
+      if (!e.ctrlKey) return;
+      if (isInput(e.target)) return;
+      if (e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.shiftKey) redo();
+        else undo();
+      }
+    }
+
+    function init() {
+      log('init start');
+      document.documentElement.classList.add('ed-mode-use');
+      shield = createShield();
+      overlay = createOverlay();
+      shield.addEventListener('mousedown', onShieldMouseDown);
+      document.addEventListener('keydown', onKeyDown);
+      log('init done, editable elements: ' + document.querySelectorAll('[data-edit-id]').length);
+    }
+
+    window.addEventListener('message', function(e) {
+      if (!e.data) return;
+      if (e.data.type === 'setMode') setMode(e.data.mode);
+      else if (e.data.type === 'undo') undo();
+      else if (e.data.type === 'redo') redo();
+    });
+
+    init();
+  })();`;
+
+  function injectEditIds(html) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    let idx = 0;
+    function walk(node) {
+      if (node.nodeType !== 1) return;
+      const tag = node.tagName.toLowerCase();
+      if (['script','style','link','meta','head','html','br','hr','iframe'].includes(tag)) return;
+      if (!node.hasAttribute('data-edit-id')) {
+        node.setAttribute('data-edit-id', 'ed-' + Date.now() + '-' + (idx++));
+      }
+      Array.from(node.children).forEach(walk);
+    }
+    if (doc.body) walk(doc.body);
+    return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+  }
+
+  function loadIntoIframe(htmlWithIds) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlWithIds, 'text/html');
+
+    const style = doc.createElement('style');
+    style.id = 'ed-style';
+    style.textContent = '.ed-mode-edit [data-edit-id].ed-selected { outline: 2px solid #0e639c !important; } body.ed-dragging * { user-select: none !important; -webkit-user-select: none !important; } #ed-overlay { position: fixed; pointer-events: none; box-sizing: border-box; border: 2px solid #0e639c; z-index: 2147483646; display: none; }';
+    if (doc.head) doc.head.appendChild(style);
+
+    const script = doc.createElement('script');
+    script.textContent = iframeEditorScript;
+    if (doc.body) doc.body.appendChild(script);
+
+    preview.srcdoc = doc.documentElement.outerHTML;
+  }
+
+  function setMode(newMode) {
+    mode = newMode;
+    if (mode === 'use') {
+      btnMode.textContent = '进入修改模式';
+      btnMode.classList.remove('mode-edit');
+      btnMode.classList.add('mode-use');
+      status.textContent = '使用模式：页面可正常点击、输入';
+      modeHint.textContent = '点击“进入修改模式”后可拖拽组件；修改模式下 Ctrl+Z 撤销，Ctrl+Shift+Z 重做。';
+    } else {
+      btnMode.textContent = '进入使用模式';
+      btnMode.classList.remove('mode-use');
+      btnMode.classList.add('mode-edit');
+      status.textContent = '修改模式：点击并拖拽组件，Ctrl+Z 撤销';
+      modeHint.textContent = '点击元素选中并拖动；Ctrl+Z 撤销，Ctrl+Shift+Z 重做；切换到使用模式可恢复页面交互。';
+    }
+    if (preview.contentWindow) {
+      preview.contentWindow.postMessage({ type: 'setMode', mode: mode }, '*');
+    }
+  }
+
+  function updateProps(id) {
+    selectedId = id;
+    if (!id) {
+      propContent.innerHTML = '<div class="empty">未选中元素</div>';
+      return;
+    }
+    const t = transforms[id] || { x: 0, y: 0 };
+    propContent.innerHTML = `
+      <div class="row"><span>edit-id:</span> ${id}</div>
+      <div class="row"><span>translateX:</span> ${t.x}px</div>
+      <div class="row"><span>translateY:</span> ${t.y}px</div>
+    `;
+  }
+
+  function buildOutputHtml() {
+    if (!templatedHtml) return '';
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(templatedHtml, 'text/html');
+
+    Object.entries(transforms).forEach(([id, t]) => {
+      const el = doc.querySelector('[data-edit-id="' + id + '"]');
+      if (el) el.style.transform = 'translate(' + t.x + 'px, ' + t.y + 'px)';
+    });
+
+    doc.querySelectorAll('[data-edit-id]').forEach(el => el.removeAttribute('data-edit-id'));
+    const edStyle = doc.getElementById('ed-style');
+    if (edStyle) edStyle.remove();
+
+    return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+  }
+
+  function downloadHtml(content, filename) {
+    const blob = new Blob([content], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'edited.html';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  async function saveToOrigin() {
+    // ----- server mode: POST to /api/save, overwrite original file directly -----
+    if (serverMode) {
+      try {
+        const res = await fetch('/api/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: currentFileName,
+            content: buildOutputHtml(),
+          }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          status.textContent = '已保存到原文件';
+        } else {
+          status.textContent = '保存失败: ' + (data.error || '未知错误');
+        }
+      } catch (err) {
+        status.textContent = '保存失败: ' + err.message;
+      }
+      return;
+    }
+
+    // ----- standalone mode (double-click open): File System Access API or download -----
+    let handle = currentFileHandle;
+    if (!handle) {
+      try {
+        handle = await window.showSaveFilePicker({
+          suggestedName: currentFileName || 'edited.html',
+          types: [
+            { description: 'HTML 文件', accept: { 'text/html': ['.html', '.htm'] } },
+          ],
+        });
+        currentFileHandle = handle;
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          status.textContent = '保存取消或不支持: 请使用"导出 HTML"下载';
+        }
+        return;
+      }
+    }
+    try {
+      const writable = await handle.createWritable();
+      const content = buildOutputHtml();
+      await writable.write(content);
+      await writable.close();
+      status.textContent = '已保存';
+    } catch (err) {
+      // Fallback: trigger download if File System Access API fails
+      try {
+        const content = buildOutputHtml();
+        downloadHtml(content, currentFileName || 'edited.html');
+        status.textContent = '已导出下载（保存到原文件不兼容当前浏览器）';
+      } catch (e2) {
+        status.textContent = '保存失败: ' + err.message;
+      }
+    }
+  }
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    currentFileName = file.name;
+    originalHtml = await file.text();
+    templatedHtml = injectEditIds(originalHtml);
+    transforms = {};
+    selectedId = null;
+    mode = 'use';
+    updateProps(null);
+    loadIntoIframe(templatedHtml);
+    btnMode.disabled = false;
+    btnExport.disabled = false;
+    btnSaveOrigin.disabled = false;
+    setMode('use');
+    status.textContent = '已加载: ' + file.name;
+  });
+
+  async function loadFromUrl(fileUrl, displayName) {
+    serverMode = true; // loaded from the local server → use /api/save
+    try {
+      const res = await fetch(fileUrl);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      originalHtml = await res.text();
+      templatedHtml = injectEditIds(originalHtml);
+      transforms = {};
+      selectedId = null;
+      mode = 'use';
+      currentFileName = displayName || fileUrl;
+      sourceUrl = fileUrl;
+      currentFileHandle = null;
+      updateProps(null);
+      loadIntoIframe(templatedHtml);
+      btnMode.disabled = false;
+      btnExport.disabled = false;
+      btnSaveOrigin.disabled = false;
+      btnRefresh.disabled = false;
+      setMode('use');
+      status.textContent = '已加载: ' + currentFileName;
+    } catch (err) {
+      status.textContent = '加载失败: ' + err.message;
+      console.error(err);
+    }
+  }
+
+  (function initFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const fileParam = params.get('file');
+    if (fileParam) {
+      loadFromUrl(fileParam, fileParam);
+    }
+  })();
+
+  btnMode.addEventListener('click', () => {
+    setMode(mode === 'use' ? 'edit' : 'use');
+  });
+
+  btnExport.addEventListener('click', () => {
+    if (!templatedHtml) return;
+    const content = buildOutputHtml();
+    const name = currentFileName || 'edited.html';
+    downloadHtml(content, 'edited-' + name);
+    status.textContent = '已导出';
+  });
+
+  btnSaveOrigin.addEventListener('click', saveToOrigin);
+
+  btnRefresh.addEventListener('click', async () => {
+    if (!sourceUrl) return;
+    btnRefresh.disabled = true;
+    status.textContent = '正在刷新...';
+    try {
+      const res = await fetch(sourceUrl);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      originalHtml = await res.text();
+      templatedHtml = injectEditIds(originalHtml);
+      transforms = {};
+      selectedId = null;
+      mode = 'use';
+      updateProps(null);
+      loadIntoIframe(templatedHtml);
+      if (serverMode) setMode('use');
+      status.textContent = '已刷新: ' + currentFileName;
+    } catch (err) {
+      status.textContent = '刷新失败: ' + err.message;
+    } finally {
+      btnRefresh.disabled = false;
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey) return;
+    const tag = e.target && e.target.tagName ? e.target.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (preview.contentWindow) {
+        preview.contentWindow.postMessage({ type: e.shiftKey ? 'redo' : 'undo' }, '*');
+      }
+    }
+  });
+
+  window.addEventListener('message', (e) => {
+    if (!e.data) return;
+    if (e.data.type === 'select') {
+      updateProps(e.data.id);
+    } else if (e.data.type === 'transform') {
+      transforms[e.data.id] = { x: e.data.x, y: e.data.y };
+      if (selectedId === e.data.id) updateProps(selectedId);
+    } else if (e.data.type === 'transformsSnapshot') {
+      transforms = e.data.transforms || {};
+      if (selectedId) updateProps(selectedId);
+    }
+  });
+</script>
+</body>
+</html>
