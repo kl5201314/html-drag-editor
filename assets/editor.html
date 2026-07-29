@@ -89,7 +89,7 @@
     <div class="props">
       <h3>属性</h3>
       <div id="propContent"><div class="empty">未选中元素</div></div>
-      <div class="hint" id="modeHint">导入后点击“进入修改模式”开始拖拽。修改模式下 Ctrl+Z 撤销，Ctrl+Shift+Z 重做。</div>
+      <div class="hint" id="modeHint">导入后点击"进入修改模式"开始拖拽。修改模式下 Ctrl+Z 撤销，Ctrl+Shift+Z 重做。</div>
     </div>
   </div>
 
@@ -126,6 +126,9 @@
     let dragStart = { x: 0, y: 0, elX: 0, elY: 0 };
     let overlay = null;
     let shield = null;
+    let handlesContainer = null;
+    let resizeState = null;
+    let editingInput = null;
 
     function log(msg) { console.log('[ed]', msg); }
 
@@ -145,9 +148,47 @@
       return ov;
     }
 
+    function createHandles() {
+      const c = document.createElement('div');
+      c.id = 'ed-handles';
+      c.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;display:none;';
+      var defs = [
+        ['nw','top:-5px;left:-5px','nw-resize'],
+        ['n','top:-5px;left:50%;margin-left:-5px','n-resize'],
+        ['ne','top:-5px;right:-5px','ne-resize'],
+        ['e','top:50%;margin-top:-5px;right:-5px','e-resize'],
+        ['se','bottom:-5px;right:-5px','se-resize'],
+        ['s','bottom:-5px;left:50%;margin-left:-5px','s-resize'],
+        ['sw','bottom:-5px;left:-5px','sw-resize'],
+        ['w','top:50%;margin-top:-5px;left:-5px','w-resize']
+      ];
+      defs.forEach(function(p) {
+        var h = document.createElement('div');
+        h.className = 'ed-handle';
+        h.setAttribute('data-handle', p[0]);
+        h.style.cssText = 'position:absolute;width:10px;height:10px;background:#0e639c;border:1px solid #fff;pointer-events:auto;cursor:' + p[2] + ';' + p[1];
+        c.appendChild(h);
+      });
+      document.body.appendChild(c);
+      return c;
+    }
+
+    function updateHandles() {
+      if (!handlesContainer) return;
+      if (!selectedId) { handlesContainer.style.display = 'none'; return; }
+      var el = document.querySelector('[data-edit-id="' + selectedId + '"]');
+      if (!el) { handlesContainer.style.display = 'none'; return; }
+      var rect = el.getBoundingClientRect();
+      handlesContainer.style.display = 'block';
+      handlesContainer.style.left = rect.left + 'px';
+      handlesContainer.style.top = rect.top + 'px';
+      handlesContainer.style.width = rect.width + 'px';
+      handlesContainer.style.height = rect.height + 'px';
+    }
+
     function updateOverlay(el) {
       if (!el || !overlay) return;
-      const rect = el.getBoundingClientRect();
+      var rect = el.getBoundingClientRect();
       overlay.style.display = 'block';
       overlay.style.left = rect.left + 'px';
       overlay.style.top = rect.top + 'px';
@@ -165,7 +206,7 @@
 
     function isInput(el) {
       if (!el) return false;
-      const tag = el.tagName.toLowerCase();
+      var tag = el.tagName.toLowerCase();
       return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable;
     }
 
@@ -175,8 +216,10 @@
       if (el) {
         el.classList.add('ed-selected');
         updateOverlay(el);
-      } else if (overlay) {
-        overlay.style.display = 'none';
+        updateHandles();
+      } else {
+        if (overlay) overlay.style.display = 'none';
+        if (handlesContainer) handlesContainer.style.display = 'none';
       }
       parent.postMessage({ type: 'select', id: selectedId }, '*');
     }
@@ -184,18 +227,20 @@
     function applyTransform(el, t) {
       el.style.transform = 'translate(' + t.x + 'px, ' + t.y + 'px)';
       updateOverlay(el);
+      updateHandles();
     }
 
     function applyAllTransforms() {
       document.querySelectorAll('[data-edit-id]').forEach(function(el) {
-        const id = el.getAttribute('data-edit-id');
-        const t = transforms[id];
+        var id = el.getAttribute('data-edit-id');
+        var t = transforms[id];
         if (t) el.style.transform = 'translate(' + t.x + 'px, ' + t.y + 'px)';
         else el.style.transform = '';
       });
       if (selectedId) {
-        const el = document.querySelector('[data-edit-id="' + selectedId + '"]');
+        var el = document.querySelector('[data-edit-id="' + selectedId + '"]');
         updateOverlay(el);
+        updateHandles();
       }
     }
 
@@ -239,12 +284,32 @@
       });
     }
 
+    function peekUnder(x, y) {
+      if (!shield) return null;
+      shield.style.display = 'none';
+      var el = document.elementFromPoint(x, y);
+      shield.style.display = 'block';
+      return el;
+    }
+
+    function stopEditing() {
+      if (editingInput) {
+        if (editingInput.contentEditable === 'true') {
+          editingInput.contentEditable = 'inherit';
+        }
+        editingInput.blur();
+        editingInput = null;
+      }
+    }
+
     function setMode(newMode) {
       mode = newMode;
       if (mode === 'use') {
+        if (editingInput) stopEditing();
         select(null);
         document.body.classList.remove('ed-dragging');
         if (shield) shield.style.display = 'none';
+        if (handlesContainer) handlesContainer.style.display = 'none';
         document.documentElement.classList.remove('ed-mode-edit');
         document.documentElement.classList.add('ed-mode-use');
         prepareUseModeLinks();
@@ -259,14 +324,15 @@
     function getElementUnderShield(x, y) {
       if (!shield) return null;
       shield.style.display = 'none';
-      const el = document.elementFromPoint(x, y);
+      var el = document.elementFromPoint(x, y);
       shield.style.display = 'block';
       return findEditable(el);
     }
 
     function onShieldMouseDown(e) {
       if (mode !== 'edit') return;
-      const el = getElementUnderShield(e.clientX, e.clientY);
+      if (editingInput) { stopEditing(); return; }
+      var el = getElementUnderShield(e.clientX, e.clientY);
       if (!el) { select(null); return; }
       select(el);
       dragging = true;
@@ -274,8 +340,8 @@
       document.body.classList.add('ed-dragging');
       dragStart.x = e.clientX;
       dragStart.y = e.clientY;
-      const id = el.getAttribute('data-edit-id');
-      const t = transforms[id] || { x: 0, y: 0 };
+      var id = el.getAttribute('data-edit-id');
+      var t = transforms[id] || { x: 0, y: 0 };
       dragStart.elX = t.x;
       dragStart.elY = t.y;
 
@@ -285,8 +351,8 @@
           recordBefore();
           dragHasMoved = true;
         }
-        const dx = ev.clientX - dragStart.x;
-        const dy = ev.clientY - dragStart.y;
+        var dx = ev.clientX - dragStart.x;
+        var dy = ev.clientY - dragStart.y;
         transforms[id] = { x: dragStart.elX + dx, y: dragStart.elY + dy };
         applyTransform(el, transforms[id]);
         parent.postMessage({ type: 'transform', id: id, x: transforms[id].x, y: transforms[id].y }, '*');
@@ -304,9 +370,93 @@
       document.addEventListener('mouseup', onUp);
     }
 
+    function onShieldDblClick(e) {
+      if (mode !== 'edit') return;
+      var raw = peekUnder(e.clientX, e.clientY);
+      if (!raw) return;
+      var tag = raw.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+        stopEditing();
+        raw.focus();
+        editingInput = raw;
+        raw.addEventListener('blur', function handler() {
+          raw.removeEventListener('blur', handler);
+          editingInput = null;
+        }, { once: true });
+        return;
+      }
+      var textEl = raw.closest('p,div,span,h1,h2,h3,h4,h5,h6,td,th,li,label,a,figcaption,blockquote,pre,code');
+      if (textEl) {
+        stopEditing();
+        textEl.contentEditable = 'true';
+        textEl.focus();
+        editingInput = textEl;
+        textEl.addEventListener('blur', function handler() {
+          textEl.removeEventListener('blur', handler);
+          textEl.contentEditable = 'inherit';
+          editingInput = null;
+        }, { once: true });
+      }
+    }
+
+    function onHandleMouseDown(e) {
+      var handle = e.target.closest('.ed-handle');
+      if (!handle || mode !== 'edit' || e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var el = document.querySelector('[data-edit-id="' + selectedId + '"]');
+      if (!el) return;
+      var rect = el.getBoundingClientRect();
+      resizeState = {
+        el: el,
+        handle: handle.getAttribute('data-handle'),
+        startX: e.clientX,
+        startY: e.clientY,
+        startW: rect.width,
+        startH: rect.height
+      };
+      document.body.classList.add('ed-dragging');
+
+      function onMove(ev) {
+        if (!resizeState) return;
+        var rs = resizeState;
+        var dx = ev.clientX - rs.startX;
+        var dy = ev.clientY - rs.startY;
+        var newW = rs.startW;
+        var newH = rs.startH;
+        if (rs.handle.indexOf('e') !== -1) newW = Math.max(10, rs.startW + dx);
+        if (rs.handle.indexOf('w') !== -1) {
+          newW = Math.max(10, rs.startW - dx);
+          rs.el.style.position = 'relative';
+          rs.el.style.left = (rs.startW - newW) + 'px';
+        }
+        if (rs.handle.indexOf('s') !== -1) newH = Math.max(10, rs.startH + dy);
+        if (rs.handle.indexOf('n') !== -1) {
+          newH = Math.max(10, rs.startH - dy);
+          rs.el.style.position = 'relative';
+          rs.el.style.top = (rs.startH - newH) + 'px';
+        }
+        rs.el.style.width = newW + 'px';
+        rs.el.style.height = newH + 'px';
+        updateOverlay(rs.el);
+        updateHandles();
+      }
+
+      function onUp() {
+        resizeState = null;
+        document.body.classList.remove('ed-dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    }
+
     function onKeyDown(e) {
       if (!e.ctrlKey) return;
       if (isInput(e.target)) return;
+      if (editingInput) return;
       if (e.key.toLowerCase() === 'z') {
         e.preventDefault();
         e.stopPropagation();
@@ -320,7 +470,10 @@
       document.documentElement.classList.add('ed-mode-use');
       shield = createShield();
       overlay = createOverlay();
+      handlesContainer = createHandles();
       shield.addEventListener('mousedown', onShieldMouseDown);
+      shield.addEventListener('dblclick', onShieldDblClick);
+      handlesContainer.addEventListener('mousedown', onHandleMouseDown);
       document.addEventListener('keydown', onKeyDown);
       log('init done, editable elements: ' + document.querySelectorAll('[data-edit-id]').length);
     }
@@ -375,13 +528,13 @@
       btnMode.classList.remove('mode-edit');
       btnMode.classList.add('mode-use');
       status.textContent = '使用模式：页面可正常点击、输入';
-      modeHint.textContent = '点击“进入修改模式”后可拖拽组件；修改模式下 Ctrl+Z 撤销，Ctrl+Shift+Z 重做。';
+      modeHint.textContent = '点击"进入修改模式"后可拖拽组件和改变大小；修改模式下双击可编辑文字。';
     } else {
       btnMode.textContent = '进入使用模式';
       btnMode.classList.remove('mode-use');
       btnMode.classList.add('mode-edit');
-      status.textContent = '修改模式：点击并拖拽组件，Ctrl+Z 撤销';
-      modeHint.textContent = '点击元素选中并拖动；Ctrl+Z 撤销，Ctrl+Shift+Z 重做；切换到使用模式可恢复页面交互。';
+      status.textContent = '修改模式：点击拖拽移动，拖拽边框改变大小，双击编辑文字';
+      modeHint.textContent = '点击元素选中后拖拽移动；拖拽蓝色边框手柄改变大小；双击文字/输入框可编辑；Ctrl+Z 撤销，Ctrl+Shift+Z 重做。';
     }
     if (preview.contentWindow) {
       preview.contentWindow.postMessage({ type: 'setMode', mode: mode }, '*');
