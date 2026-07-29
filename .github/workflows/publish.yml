@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
+      id-token: write   # <--- 受信任发布必需的权限
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -25,3 +25,4 @@ jobs:
 
       - name: Publish to npm
         run: npm publish
+        # 注意：这里没有 env，不再需要 NODE_AUTH_TOKEN
